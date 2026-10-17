@@ -294,6 +294,17 @@ export function init(dialog, dotnet, options) {
       vimBindings = enabled === true;
     },
 
+    /** Resolves once the browser has had a chance to paint (or after a timeout, when frames are throttled). */
+    afterPaint() {
+      return new Promise(resolve => {
+        const fallback = setTimeout(resolve, 100);
+        requestAnimationFrame(() => setTimeout(() => {
+          clearTimeout(fallback);
+          resolve();
+        }, 0));
+      });
+    },
+
     openInNewTab(url) {
       window.open(url, '_blank', 'noopener,noreferrer');
     },

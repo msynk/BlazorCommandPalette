@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Typing stays responsive with large registries: the fuzzy matcher no longer allocates per field, the query is parsed once
+  per keystroke, ranking only sorts the rows it keeps (`MaxResults`), and async source results reuse the registry matches.
+  On WebAssembly, searches slower than a frame run after the keystroke paints and fold fast typing into one search
+  (navigation keys still act on the latest query). With 2,000 commands the median keystroke drops from ~180 ms to ~20 ms.
+
 ## 1.0.0
 
 Initial release.

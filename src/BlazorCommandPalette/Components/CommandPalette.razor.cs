@@ -47,6 +47,9 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
     private CancellationTokenSource? _toastCts;
     private bool _executing;
     private bool _pointerSelectionSuspended;
+    private bool _inputPending;
+    private int _inputVersion;
+    private TimeSpan _lastSearchCost;
 
     private List<Command> _all = [];
     private HashSet<string> _parentIds = new(StringComparer.Ordinal);
@@ -55,6 +58,8 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
     private List<PaletteRow> _itemRows = [];
     private CommandMode? _mode;
     private string _effectiveQuery = string.Empty;
+    private List<CommandMatch> _registryMatches = [];
+    private (PageFrame? Page, CommandMode? Mode, string? Query) _registryMatchKey;
 
     [Inject] private IJSRuntime JS { get; set; } = default!;
     [Inject] private NavigationManager Navigation { get; set; } = default!;
@@ -211,6 +216,9 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
             await CloseCoreAsync();
         }
     }
+
+    // A keystroke whose search is still deferred (see OnInput) renders together with its results.
+    protected override bool ShouldRender() => !_inputPending;
 
     protected override async Task OnAfterRenderAsync(bool firstRender)
     {
@@ -411,6 +419,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         }
 
         _isOpen = false;
+        _inputPending = false;
         _debounceCts?.Cancel();
         _confirmingId = null;
         Service.SetOpen(false);
@@ -444,6 +453,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
     private void ResetState()
     {
         _query = string.Empty;
+        _inputPending = false;
         _pages.Clear();
         _pages.Add(new PageFrame { Title = S.Home });
         _sourceResults.Clear();
@@ -456,18 +466,42 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
 
     // ---- Input ------------------------------------------------------------------------------------
 
-    private Task OnInput(ChangeEventArgs e)
+    private async Task OnInput(ChangeEventArgs e)
     {
         _query = e.Value?.ToString() ?? string.Empty;
-        return OnQueryUpdatedAsync();
+        if (_handle is null || _lastSearchCost < SlowSearchThreshold)
+        {
+            await OnQueryUpdatedAsync();
+            return;
+        }
+
+        // Searching takes longer than a frame: let the keystroke paint first, and fold keys typed meanwhile into one search.
+        // Rendering waits too (see ShouldRender), so the list never re-renders with stale rows in between.
+        var version = ++_inputVersion;
+        _inputPending = true;
+        try
+        {
+            await _handle.InvokeVoidAsync("afterPaint");
+        }
+        catch (Exception ex) when (ex is JSException or JSDisconnectedException or OperationCanceledException or ObjectDisposedException)
+        {
+        }
+
+        if (_inputPending && version == _inputVersion)
+        {
+            await OnQueryUpdatedAsync();
+        }
     }
 
     private async Task OnQueryUpdatedAsync()
     {
+        _inputPending = false;
         _confirmingId = null;
         _activeIndex = 0;
         _pointerSelectionSuspended = true;
+        var started = Stopwatch.GetTimestamp();
         Rebuild();
+        _lastSearchCost = Stopwatch.GetElapsedTime(started);
         TriggerSourceSearch();
         _pendingScroll = true;
         if (OnQueryChanged.HasDelegate)
@@ -483,6 +517,12 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         if (!_isOpen)
         {
             return;
+        }
+
+        // Navigation acts on the results of everything typed so far.
+        if (_inputPending)
+        {
+            await OnQueryUpdatedAsync();
         }
 
         // Browsers report Shift+letter as an upper-case key ("P"); match bindings case-insensitively.
@@ -684,6 +724,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
     {
         _pages.Add(frame);
         _query = frame.Prompt?.InitialValue ?? string.Empty;
+        _inputPending = false;
         _activeIndex = 0;
         _confirmingId = null;
         _sourceResults.Clear();
@@ -702,6 +743,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         var frame = _pages[^1];
         _pages.RemoveAt(_pages.Count - 1);
         _query = frame.QueryBefore;
+        _inputPending = false;
         _activeIndex = 0;
         _confirmingId = null;
         _sourceResults.Clear();
@@ -980,6 +1022,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
             case CommandResult.ResetResult:
                 _pages.RemoveRange(1, _pages.Count - 1);
                 _query = string.Empty;
+                _inputPending = false;
                 _activeIndex = 0;
                 _pendingFocus = true;
                 Rebuild();
@@ -1066,10 +1109,16 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         var sources = ActiveSources().Where(s => _effectiveQuery.Length >= s.MinQueryLength).ToList();
         if (sources.Count == 0)
         {
+            // Every caller has just rebuilt; only stale source rows or the loading state need another pass.
+            var stale = _sourceResults.Count > 0 || _loading;
             _sourceResults.Clear();
             _pendingSources.Clear();
             _loading = false;
-            Rebuild();
+            if (stale)
+            {
+                Rebuild(reuseRegistryMatches: true);
+            }
+
             return;
         }
 
@@ -1127,7 +1176,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
                     _sourceResults[source.Name] = results.Take(source.MaxResults).ToList();
                     _pendingSources.Remove(source.Name);
                     _loading = _pendingSources.Count > 0;
-                    Rebuild();
+                    Rebuild(reuseRegistryMatches: true);
                     _pendingScroll = true;
                     StateHasChanged();
                 });
@@ -1172,11 +1221,17 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         }
     }
 
-    private void Rebuild()
+    /// <param name="reuseRegistryMatches">Only async source results changed: keep the registry matches computed for this query.</param>
+    private void Rebuild(bool reuseRegistryMatches = false)
     {
-        RefreshSnapshot();
         var page = CurrentPage;
         ResolveMode();
+        var key = (page, _mode, _effectiveQuery);
+        var reuse = reuseRegistryMatches && _registryMatchKey == key;
+        if (!reuse)
+        {
+            RefreshSnapshot();
+        }
 
         var rows = new List<PaletteRow>();
         var items = new List<PaletteRow>();
@@ -1190,25 +1245,17 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
         }
 
         var hasQuery = _effectiveQuery.Length > 0;
-        var candidates = Candidates(page).ToList();
         var matcher = Options.Matcher;
+        var query = CommandQuery.Parse(_effectiveQuery);
 
-        var matches = new List<CommandMatch>(candidates.Count);
-        foreach (var c in candidates)
+        // Matching the registry dominates the cost of a keystroke; async source results arriving later reuse it.
+        if (!reuse)
         {
-            var m = matcher.Match(c, _effectiveQuery, Options.Weights);
-            if (m is null)
-            {
-                if (c.AlwaysShow)
-                {
-                    matches.Add(new CommandMatch(c, double.NegativeInfinity, [], [], null));
-                }
-
-                continue;
-            }
-
-            matches.Add(m);
+            _registryMatches = MatchCandidates(page, matcher, query);
+            _registryMatchKey = key;
         }
+
+        var matches = new List<CommandMatch>(_registryMatches);
 
         // Interleave sources that opt into matcher ranking.
         var blockSources = new List<(string Name, List<CommandMatch> Items)>();
@@ -1224,7 +1271,7 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
                 foreach (var c in results)
                 {
                     var scoped = c.Group is null ? c.With(b => b.Group(source.Name)) : c;
-                    var m = matcher.Match(scoped, _effectiveQuery, Options.Weights);
+                    var m = matcher.Match(scoped, query, Options.Weights);
                     if (m is not null)
                     {
                         matches.Add(m with { FromSource = true, SourceName = source.Name });
@@ -1235,18 +1282,14 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
             {
                 var block = results.Select((c, i) =>
                 {
-                    var m = hasQuery ? matcher.Match(c, _effectiveQuery, Options.Weights) : null;
+                    var m = hasQuery ? matcher.Match(c, query, Options.Weights) : null;
                     return new CommandMatch(c, 0, m?.TitlePositions ?? [], m?.SubtitlePositions ?? [], null) { Rank = -i, FromSource = true, SourceName = source.Name };
                 }).ToList();
                 blockSources.Add((source.Name, block));
             }
         }
 
-        var ranked = Ranker.Rank(matches, hasQuery, id => EffectiveEnableHistory ? History.Frecency(id) : 0);
-        if (ranked.Count > Options.MaxResults)
-        {
-            ranked = ranked.Take(Options.MaxResults).ToList();
-        }
+        var ranked = Ranker.Rank(matches, hasQuery, id => EffectiveEnableHistory ? History.Frecency(id) : 0, Options.MaxResults);
 
         var itemCounter = 0;
         var usedIds = new HashSet<string>(StringComparer.Ordinal);
@@ -1360,6 +1403,28 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
             1 => S.OneResultAnnouncement,
             _ => S.Format(S.ResultsAnnouncement, items.Count),
         };
+    }
+
+    private List<CommandMatch> MatchCandidates(PageFrame page, ICommandMatcher matcher, CommandQuery query)
+    {
+        var matches = new List<CommandMatch>();
+        foreach (var c in Candidates(page))
+        {
+            var m = matcher.Match(c, query, Options.Weights);
+            if (m is null)
+            {
+                if (c.AlwaysShow)
+                {
+                    matches.Add(new CommandMatch(c, double.NegativeInfinity, [], [], null));
+                }
+
+                continue;
+            }
+
+            matches.Add(m);
+        }
+
+        return matches;
     }
 
     private int GroupOrderIndex(string group)
@@ -1494,6 +1559,12 @@ public partial class CommandPalette : ComponentBase, IAsyncDisposable
     private string EffectivePlaceholder => CurrentPage.Placeholder ?? (_mode?.Placeholder) ?? Placeholder ?? S.Placeholder;
 
     private string EffectiveTheme => Theme ?? Options.Theme;
+
+    /// <summary>
+    /// Searches slower than this defer to the next frame so typing stays responsive. Only on WebAssembly, where search and
+    /// painting share one thread; on the server each keystroke already round-trips, so another hop would only add latency.
+    /// </summary>
+    internal TimeSpan SlowSearchThreshold { get; set; } = OperatingSystem.IsBrowser() ? TimeSpan.FromMilliseconds(8) : TimeSpan.MaxValue;
 
     private IReadOnlyList<string> Breadcrumbs => _pages.Skip(1).Select(p => p.Title).ToList();
 

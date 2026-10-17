@@ -9,6 +9,7 @@ namespace BlazorCommandPalette.Tests;
 public class CommandPaletteComponentTests : BunitContext
 {
     private readonly ICommandPaletteService _service;
+    private readonly BunitJSModuleInterop _jsHandle;
 
     public CommandPaletteComponentTests()
     {
@@ -17,7 +18,7 @@ public class CommandPaletteComponentTests : BunitContext
         JSInterop.Mode = JSRuntimeMode.Loose;
 
         var module = JSInterop.SetupModule("./_content/BlazorCommandPalette/Components/CommandPalette.razor.js");
-        var handle = module.SetupModule("init", _ => true);
+        var handle = _jsHandle = module.SetupModule("init", _ => true);
         handle.Setup<bool>("isMac").SetResult(false);
         handle.SetupVoid("open", _ => true).SetVoidResult();
         handle.SetupVoid("close").SetVoidResult();
@@ -409,6 +410,63 @@ public class CommandPaletteComponentTests : BunitContext
         }, TimeSpan.FromSeconds(3));
 
         Assert.Equal(["abc"], calls); // keystrokes inside the debounce window never reach the source
+    }
+
+    [Fact]
+    public async Task Slow_searches_wait_for_the_keystroke_to_paint_and_coalesce()
+    {
+        var queries = new List<string>();
+        _service.Register(Cmd.New("Alpha"), Cmd.New("Beta"), Cmd.New("Gamma"));
+        var paint = _jsHandle.SetupVoid("afterPaint");
+        var cut = Render<CommandPalette>(p => p.Add(x => x.OnQueryChanged, q => queries.Add(q)));
+        cut.Instance.SlowSearchThreshold = TimeSpan.Zero;
+        await cut.InvokeAsync(() => _service.OpenAsync());
+        cut.WaitForAssertion(() => Assert.Equal(3, cut.FindAll("[data-cp=item]").Count));
+
+        await cut.InvokeAsync(() => cut.Find("[data-cp=input]").Input("g"));
+        await cut.InvokeAsync(() => cut.Find("[data-cp=input]").Input("ga"));
+        Assert.Equal(3, cut.FindAll("[data-cp=item]").Count); // not searched (nor re-rendered) before the paint
+
+        await cut.InvokeAsync(paint.SetVoidResult);
+        cut.WaitForAssertion(() => Assert.Equal(["Gamma"], cut.FindAll("[data-cp=item] .cp-item-title").Select(t => t.TextContent.Trim())));
+        Assert.Equal(["ga"], queries);
+    }
+
+    [Fact]
+    public async Task Enter_during_a_deferred_search_runs_the_fresh_top_result()
+    {
+        var executed = new List<string>();
+        _service.Register(
+            Cmd.Action("Alpha", () => executed.Add("alpha")).Priority(CommandPriority.High),
+            Cmd.Action("Beta", () => executed.Add("beta")));
+        _jsHandle.SetupVoid("afterPaint"); // never completes: the keystroke stays deferred
+        var cut = RenderPalette();
+        cut.Instance.SlowSearchThreshold = TimeSpan.Zero;
+        await cut.InvokeAsync(() => _service.OpenAsync());
+        cut.WaitForAssertion(() => Assert.Equal(2, cut.FindAll("[data-cp=item]").Count));
+
+        await cut.InvokeAsync(() => cut.Find("[data-cp=input]").Input("bet"));
+        await cut.InvokeAsync(() => cut.Instance.OnKeyDown("Enter", false, false, false, false));
+
+        Assert.Equal(["beta"], executed);
+    }
+
+    [Fact]
+    public async Task Closing_during_a_deferred_search_keeps_rendering()
+    {
+        _service.Register(Cmd.New("Alpha"), Cmd.New("Beta"));
+        _jsHandle.SetupVoid("afterPaint");
+        var cut = RenderPalette();
+        cut.Instance.SlowSearchThreshold = TimeSpan.Zero;
+        await cut.InvokeAsync(() => _service.OpenAsync());
+        cut.WaitForAssertion(() => Assert.Equal(2, cut.FindAll("[data-cp=item]").Count));
+
+        await cut.InvokeAsync(() => cut.Find("[data-cp=input]").Input("bet"));
+        await cut.InvokeAsync(() => _service.CloseAsync());
+        cut.WaitForAssertion(() => Assert.Equal("false", cut.Find("dialog").GetAttribute("data-open")));
+
+        await cut.InvokeAsync(() => _service.OpenAsync());
+        cut.WaitForAssertion(() => Assert.Equal(2, cut.FindAll("[data-cp=item]").Count));
     }
 
     [Fact]

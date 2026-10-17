@@ -157,6 +157,22 @@ public class CommandRankerTests
         var ranked = ranker.Rank([weak, exact], hasQuery: true, _ => 0);
         Assert.Equal("Settings", ranked[0].Command.Title);
     }
+
+    [Fact]
+    public void Limited_ranking_keeps_the_same_order_as_a_full_sort()
+    {
+        var ranker = new CommandRanker(new CommandPaletteOptions());
+        var matches = Enumerable.Range(0, 300)
+            .Select(i => Matcher.Match(Cmd.New($"Item {i % 37}").Id($"item-{i}").Priority(i % 3).Build(), "item")!)
+            .ToList();
+
+        var full = ranker.Rank(matches, hasQuery: true, id => id.EndsWith('7') ? 4 : 0);
+        var limited = ranker.Rank(matches, hasQuery: true, id => id.EndsWith('7') ? 4 : 0, limit: 25);
+
+        Assert.Equal(full.Take(25).Select(m => m.Command.Id), limited.Select(m => m.Command.Id));
+        Assert.Equal(full.Take(25).Select(m => m.Rank), limited.Select(m => m.Rank));
+        Assert.Empty(ranker.Rank(matches, hasQuery: false, _ => 0, limit: 0));
+    }
 }
 
 public class CommandHistoryTests

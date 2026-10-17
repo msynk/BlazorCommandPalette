@@ -1,5 +1,3 @@
-using System.Buffers;
-
 namespace BlazorCommandPalette.Search;
 
 /// <summary>
@@ -38,62 +36,67 @@ public sealed class FuzzyMatcher : ICommandMatcher
             return FieldMatch.None;
         }
 
-        var caseSensitive = !IgnoreCase && query.Any(char.IsUpper);
+        // Runs once per field per command on every keystroke (interpreted on WebAssembly), so it avoids
+        // LINQ, per-call pooling and full-matrix initialization. Results are identical to the plain DP.
+        var caseSensitive = !IgnoreCase && HasUpper(query);
+        int p = query.Length, t = text.Length;
+        var size = (p + 1) * (t + 1);
+        (t_scratch ??= new Scratch()).Get(p, t, size, out var q, out var tx, out var m, out var d, out var consec, out var bonus);
+        Fold(query, q, caseSensitive);
+        Fold(text, tx, caseSensitive);
 
         // Fast reject: must be a subsequence.
-        if (!IsSubsequence(query, text, caseSensitive))
+        if (!IsSubsequence(q, p, tx, t))
         {
             return FieldMatch.None;
         }
 
-        int p = query.Length, t = text.Length;
-        var pool = ArrayPool<int>.Shared;
-        var size = (p + 1) * (t + 1);
-        var m = pool.Rent(size);       // best score with query[i] matched at text[j]
-        var d = pool.Rent(size);       // best score for query[..i] within text[..j]
-        var consec = pool.Rent(size);  // length of consecutive run ending at (i, j)
-        var bonus = pool.Rent(t);
-        try
+        const int NegInf = int.MinValue / 2;
+        const int Floor = int.MinValue / 4;
+        var w = t + 1;
+
+        ComputeBonus(text, bonus);
+
+        // Column 0 is the only part of m/d read before being written; consec is only read behind a match guard.
+        for (var i = 0; i <= p; i++)
         {
-            ComputeBonus(text, bonus);
-            Array.Fill(m, int.MinValue / 2, 0, size);
-            Array.Fill(d, int.MinValue / 2, 0, size);
-            Array.Fill(consec, 0, 0, size);
+            m[i * w] = NegInf;
+            d[i * w] = NegInf;
+        }
 
-            int Idx(int i, int j) => i * (t + 1) + j;
-
-            for (var i = 0; i < p; i++)
+        // Row-major (p + 1) x (t + 1) matrices: row i + 1 / column j + 1 hold query[i] / text[j].
+        // m = best score with query[i] matched at text[j]; d = best score for query[..i] within text[..j];
+        // consec = length of the consecutive run ending at (i, j).
+        for (var i = 0; i < p; i++)
+        {
+            var qc = q[i];
+            var prevRow = i * w;
+            var curRow = prevRow + w;
+            var inGapPrev = false;
+            for (var j = 0; j < t; j++)
             {
-                var qc = query[i];
-                var inGapPrev = false;
-                for (var j = 0; j < t; j++)
+                var cur = curRow + j + 1;
+                var mv = NegInf;
+                if (qc == tx[j])
                 {
-                    var tc = text[j];
-                    var cur = Idx(i + 1, j + 1);
-                    if (CharEquals(qc, tc, caseSensitive))
+                    var prevScore = 0;
+                    var run = 0;
+                    var reachable = true;
+                    if (i > 0)
                     {
-                        int prevScore;
-                        var run = 0;
-                        if (i == 0)
+                        prevScore = d[prevRow + j];
+                        if (prevScore <= Floor)
                         {
-                            prevScore = 0;
+                            reachable = false;
                         }
-                        else
+                        else if (m[prevRow + j] == prevScore)
                         {
-                            prevScore = d[Idx(i, j)];
-                            if (prevScore <= int.MinValue / 4)
-                            {
-                                m[cur] = int.MinValue / 2;
-                                goto gap;
-                            }
-
-                            var prevMatch = m[Idx(i, j)];
-                            if (prevMatch == prevScore)
-                            {
-                                run = consec[Idx(i, j)];
-                            }
+                            run = consec[prevRow + j];
                         }
+                    }
 
+                    if (reachable)
+                    {
                         var b = bonus[j];
                         if (run > 0)
                         {
@@ -108,100 +111,176 @@ public sealed class FuzzyMatcher : ICommandMatcher
                             b *= BonusFirstCharMultiplier;
                         }
 
-                        if (caseSensitive || (qc == tc && char.IsUpper(tc)))
+                        if (caseSensitive || (query[i] == text[j] && char.IsUpper(text[j])))
                         {
                             b += BonusCaseMatch;
                         }
 
-                        m[cur] = prevScore + ScoreMatch + b;
+                        mv = prevScore + ScoreMatch + b;
                         consec[cur] = run + 1;
                     }
-                    else
-                    {
-                        m[cur] = int.MinValue / 2;
-                    }
-
-                gap:
-                    var left = d[Idx(i + 1, j)];
-                    var gapScore = left <= int.MinValue / 4 ? int.MinValue / 2 : left + (inGapPrev ? ScoreGapExtension : ScoreGapStart);
-                    if (m[cur] >= gapScore)
-                    {
-                        d[cur] = m[cur];
-                        inGapPrev = false;
-                    }
-                    else
-                    {
-                        d[cur] = gapScore;
-                        inGapPrev = true;
-                    }
                 }
-            }
 
-            // Best end position for the last pattern char.
-            var best = int.MinValue / 2;
-            var bestJ = -1;
-            for (var j = 0; j < t; j++)
-            {
-                var v = m[Idx(p, j + 1)];
-                if (v > best)
+                m[cur] = mv;
+                var left = d[cur - 1];
+                var gapScore = left <= Floor ? NegInf : left + (inGapPrev ? ScoreGapExtension : ScoreGapStart);
+                if (mv >= gapScore)
                 {
-                    best = v;
-                    bestJ = j;
+                    d[cur] = mv;
+                    inGapPrev = false;
                 }
-            }
-
-            if (bestJ < 0 || best <= int.MinValue / 4)
-            {
-                return FieldMatch.None;
-            }
-
-            // Backtrace positions.
-            var positions = new int[p];
-            var jj = bestJ;
-            for (var i = p - 1; i >= 0; i--)
-            {
-                positions[i] = jj;
-                if (i == 0)
+                else
                 {
-                    break;
-                }
-
-                // Previous match ends at the j' <= jj-1 where d == m (the alignment came from a match, not a gap).
-                jj--;
-                while (jj >= 0 && d[Idx(i, jj + 1)] != m[Idx(i, jj + 1)])
-                {
-                    jj--;
+                    d[cur] = gapScore;
+                    inGapPrev = true;
                 }
             }
-
-            // Tie-breakers (fractions of one bonus point): prefer shorter texts and earlier matches.
-            var score = best - 0.02 * t - 0.01 * positions[0];
-            return new FieldMatch(true, score, positions);
         }
-        finally
+
+        // Best end position for the last pattern char.
+        var best = NegInf;
+        var bestJ = -1;
+        var lastRow = p * w;
+        for (var j = 0; j < t; j++)
         {
-            pool.Return(m);
-            pool.Return(d);
-            pool.Return(consec);
-            pool.Return(bonus);
+            var v = m[lastRow + j + 1];
+            if (v > best)
+            {
+                best = v;
+                bestJ = j;
+            }
+        }
+
+        if (bestJ < 0 || best <= Floor)
+        {
+            return FieldMatch.None;
+        }
+
+        // Backtrace positions.
+        var positions = new int[p];
+        var jj = bestJ;
+        for (var i = p - 1; i >= 0; i--)
+        {
+            positions[i] = jj;
+            if (i == 0)
+            {
+                break;
+            }
+
+            // Previous match ends at the j' <= jj-1 where d == m (the alignment came from a match, not a gap).
+            jj--;
+            var row = i * w;
+            while (jj >= 0 && d[row + jj + 1] != m[row + jj + 1])
+            {
+                jj--;
+            }
+        }
+
+        // Tie-breakers (fractions of one bonus point): prefer shorter texts and earlier matches.
+        var score = best - 0.02 * t - 0.01 * positions[0];
+        return new FieldMatch(true, score, positions);
+    }
+
+    [ThreadStatic]
+    private static Scratch? t_scratch;
+
+    /// <summary>Per-thread DP buffers reused across calls. Oversized requests get throwaway arrays.</summary>
+    private sealed class Scratch
+    {
+        private const int MaxRetainedCells = 16 * 1024;
+
+        private int[] _m = new int[256];
+        private int[] _d = new int[256];
+        private int[] _consec = new int[256];
+        private int[] _bonus = new int[64];
+        private char[] _query = new char[32];
+        private char[] _text = new char[64];
+
+        public void Get(int p, int t, int size, out char[] query, out char[] text, out int[] m, out int[] d, out int[] consec, out int[] bonus)
+        {
+            if (size > MaxRetainedCells)
+            {
+                query = new char[p];
+                text = new char[t];
+                m = new int[size];
+                d = new int[size];
+                consec = new int[size];
+                bonus = new int[t];
+                return;
+            }
+
+            if (_m.Length < size)
+            {
+                var n = Math.Min(MaxRetainedCells, Math.Max(size, _m.Length * 2));
+                _m = new int[n];
+                _d = new int[n];
+                _consec = new int[n];
+            }
+
+            if (_text.Length < t)
+            {
+                var n = Math.Max(t, _text.Length * 2);
+                _text = new char[n];
+                _bonus = new int[n];
+            }
+
+            if (_query.Length < p)
+            {
+                _query = new char[Math.Max(p, _query.Length * 2)];
+            }
+
+            query = _query;
+            text = _text;
+            m = _m;
+            d = _d;
+            consec = _consec;
+            bonus = _bonus;
         }
     }
 
-    private static bool CharEquals(char a, char b, bool caseSensitive)
-        => caseSensitive ? a == b : char.ToLowerInvariant(a) == char.ToLowerInvariant(b);
-
-    private static bool IsSubsequence(string query, string text, bool caseSensitive)
+    private static bool HasUpper(string s)
     {
-        var qi = 0;
-        for (var ti = 0; ti < text.Length && qi < query.Length; ti++)
+        foreach (var c in s)
         {
-            if (CharEquals(query[qi], text[ti], caseSensitive))
+            if (char.IsUpper(c))
             {
-                qi++;
+                return true;
             }
         }
 
-        return qi == query.Length;
+        return false;
+    }
+
+    /// <summary>Copies <paramref name="s"/> into <paramref name="dst"/>, lower-cased unless matching case-sensitively.</summary>
+    private static void Fold(string s, char[] dst, bool caseSensitive)
+    {
+        if (caseSensitive)
+        {
+            s.CopyTo(0, dst, 0, s.Length);
+            return;
+        }
+
+        for (var i = 0; i < s.Length; i++)
+        {
+            var c = s[i];
+            dst[i] = c < 128
+                ? ((uint)(c - 'A') <= 'Z' - 'A' ? (char)(c | 0x20) : c)
+                : char.ToLowerInvariant(c);
+        }
+    }
+
+    private static bool IsSubsequence(char[] query, int queryLength, char[] text, int textLength)
+    {
+        var qi = 0;
+        for (var ti = 0; ti < textLength; ti++)
+        {
+            if (text[ti] == query[qi] && ++qi == queryLength)
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private static void ComputeBonus(string text, int[] bonus)
@@ -219,6 +298,14 @@ public sealed class FuzzyMatcher : ICommandMatcher
 
     private static CharClass Classify(char c)
     {
+        if (c < 128)
+        {
+            if ((uint)(c - 'a') <= 'z' - 'a') return CharClass.Lower;
+            if ((uint)(c - 'A') <= 'Z' - 'A') return CharClass.Upper;
+            if ((uint)(c - '0') <= '9' - '0') return CharClass.Digit;
+            return CharClass.NonWord;
+        }
+
         if (char.IsLower(c)) return CharClass.Lower;
         if (char.IsUpper(c)) return CharClass.Upper;
         if (char.IsDigit(c)) return CharClass.Digit;

@@ -31,27 +31,24 @@ public static class CommandMatcherExtensions
     /// Supports fzf-style operators: <c>'exact</c>, <c>^prefix</c>, <c>suffix$</c>, <c>!negate</c>.
     /// </summary>
     public static CommandMatch? Match(this ICommandMatcher matcher, Command command, string query, MatchWeights? weights = null)
+        => matcher.Match(command, CommandQuery.Parse(query), weights ?? DefaultWeights);
+
+    /// <summary>Same as the string overload, for a query parsed once and matched against many commands.</summary>
+    internal static CommandMatch? Match(this ICommandMatcher matcher, Command command, CommandQuery query, MatchWeights weights)
     {
-        weights ??= DefaultWeights;
-        if (string.IsNullOrWhiteSpace(query))
+        var terms = query.Terms;
+        if (terms.Length == 0)
         {
             return new CommandMatch(command, 0, [], [], null);
         }
 
-        var terms = query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
         double total = 0;
-        HashSet<int>? titlePos = null;
-        HashSet<int>? subtitlePos = null;
+        int[]? titlePos = null;
+        int[]? subtitlePos = null;
         string? matchedKeyword = null;
 
-        foreach (var rawTerm in terms)
+        foreach (var (term, op) in terms)
         {
-            var (term, op) = ParseOperator(rawTerm);
-            if (term.Length == 0)
-            {
-                continue;
-            }
-
             if (op == TermOperator.Negate)
             {
                 if (AnyFieldContains(command, term))
@@ -62,47 +59,48 @@ public static class CommandMatcherExtensions
                 continue;
             }
 
-            double best = double.NegativeInfinity;
+            var best = double.NegativeInfinity;
             int[]? bestTitle = null;
             int[]? bestSubtitle = null;
             string? bestKeyword = null;
 
-            void Consider(string? text, double weight, Action<int[]> onPositions, string? keyword = null)
+            // The best weighted field wins; only title/subtitle positions are kept for highlighting.
+            if (Improves(matcher, term, op, command.Title, weights.Title, ref best, out var positions))
             {
-                if (string.IsNullOrEmpty(text))
-                {
-                    return;
-                }
+                (bestTitle, bestSubtitle, bestKeyword) = (positions, null, null);
+            }
 
-                var m = op == TermOperator.Fuzzy ? matcher.Match(term, text) : ExactMatch(term, text, op);
-                if (!m.Matched)
+            var keywords = command.Keywords;
+            for (var i = 0; i < keywords.Count; i++)
+            {
+                if (Improves(matcher, term, op, keywords[i], weights.Keyword, ref best, out _))
                 {
-                    return;
-                }
-
-                var s = m.Score * weight;
-                if (s > best)
-                {
-                    best = s;
-                    bestTitle = null;
-                    bestSubtitle = null;
-                    bestKeyword = keyword;
-                    onPositions(m.Positions);
+                    (bestTitle, bestSubtitle, bestKeyword) = (null, null, keywords[i]);
                 }
             }
 
-            Consider(command.Title, weights.Title, p => bestTitle = p);
-            foreach (var kw in command.Keywords)
+            if (Improves(matcher, term, op, command.Subtitle, weights.Subtitle, ref best, out positions))
             {
-                Consider(kw, weights.Keyword, _ => { }, kw);
+                (bestTitle, bestSubtitle, bestKeyword) = (null, positions, null);
             }
 
-            Consider(command.Subtitle, weights.Subtitle, p => bestSubtitle = p);
-            Consider(command.Group, weights.Group, _ => { });
-            Consider(command.Description, weights.Description, _ => { });
-            foreach (var tag in command.Tags)
+            if (Improves(matcher, term, op, command.Group, weights.Group, ref best, out _))
             {
-                Consider(tag, weights.Tag, _ => { });
+                (bestTitle, bestSubtitle, bestKeyword) = (null, null, null);
+            }
+
+            if (Improves(matcher, term, op, command.Description, weights.Description, ref best, out _))
+            {
+                (bestTitle, bestSubtitle, bestKeyword) = (null, null, null);
+            }
+
+            var tags = command.Tags;
+            for (var i = 0; i < tags.Count; i++)
+            {
+                if (Improves(matcher, term, op, tags[i], weights.Tag, ref best, out _))
+                {
+                    (bestTitle, bestSubtitle, bestKeyword) = (null, null, null);
+                }
             }
 
             if (double.IsNegativeInfinity(best))
@@ -113,30 +111,71 @@ public static class CommandMatcherExtensions
             total += best;
             if (bestTitle is { Length: > 0 })
             {
-                (titlePos ??= []).UnionWith(bestTitle);
+                titlePos = titlePos is null ? bestTitle : [.. titlePos, .. bestTitle];
             }
 
             if (bestSubtitle is { Length: > 0 })
             {
-                (subtitlePos ??= []).UnionWith(bestSubtitle);
+                subtitlePos = subtitlePos is null ? bestSubtitle : [.. subtitlePos, .. bestSubtitle];
             }
 
             matchedKeyword ??= bestKeyword;
         }
 
-        return new CommandMatch(
-            command,
-            total,
-            titlePos is null ? [] : [.. titlePos.Order()],
-            subtitlePos is null ? [] : [.. subtitlePos.Order()],
-            matchedKeyword);
+        return new CommandMatch(command, total, SortedDistinct(titlePos), SortedDistinct(subtitlePos), matchedKeyword);
+    }
+
+    /// <summary>Scores one field; when it beats <paramref name="best"/>, updates it and returns the field's positions.</summary>
+    private static bool Improves(ICommandMatcher matcher, string term, TermOperator op, string? text, double weight, ref double best, out int[] positions)
+    {
+        positions = [];
+        if (string.IsNullOrEmpty(text))
+        {
+            return false;
+        }
+
+        var m = op == TermOperator.Fuzzy ? matcher.Match(term, text) : ExactMatch(term, text, op);
+        if (!m.Matched)
+        {
+            return false;
+        }
+
+        var s = m.Score * weight;
+        if (!(s > best))
+        {
+            return false;
+        }
+
+        best = s;
+        positions = m.Positions;
+        return true;
+    }
+
+    /// <summary>A sorted, de-duplicated copy (matchers usually return ascending positions already).</summary>
+    private static int[] SortedDistinct(int[]? positions)
+    {
+        if (positions is null)
+        {
+            return [];
+        }
+
+        var copy = (int[])positions.Clone();
+        for (var i = 1; i < copy.Length; i++)
+        {
+            if (copy[i] <= copy[i - 1])
+            {
+                return [.. new HashSet<int>(copy).Order()];
+            }
+        }
+
+        return copy;
     }
 
     private static readonly MatchWeights DefaultWeights = new();
 
-    private enum TermOperator { Fuzzy, Exact, Prefix, Suffix, Negate }
+    internal enum TermOperator { Fuzzy, Exact, Prefix, Suffix, Negate }
 
-    private static (string Term, TermOperator Op) ParseOperator(string raw)
+    internal static (string Term, TermOperator Op) ParseOperator(string raw)
     {
         if (raw.Length > 1 && raw[0] == '!')
         {
@@ -188,5 +227,35 @@ public static class CommandMatcherExtensions
         // Exact matches score like a perfect consecutive fuzzy run plus a boundary bonus.
         var score = term.Length * (FuzzyMatcher.ScoreMatch + FuzzyMatcher.BonusConsecutive) + (idx == 0 ? FuzzyMatcher.BonusBoundary * 2 : 0);
         return new FieldMatch(true, score, Enumerable.Range(idx, term.Length).ToArray());
+    }
+}
+
+/// <summary>A query split into terms with their operators: parsed once per keystroke, matched against every command.</summary>
+internal sealed class CommandQuery
+{
+    public static CommandQuery Empty { get; } = new([]);
+
+    private CommandQuery((string Term, CommandMatcherExtensions.TermOperator Op)[] terms) => Terms = terms;
+
+    public (string Term, CommandMatcherExtensions.TermOperator Op)[] Terms { get; }
+
+    public static CommandQuery Parse(string? query)
+    {
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return Empty;
+        }
+
+        var terms = new List<(string, CommandMatcherExtensions.TermOperator)>();
+        foreach (var raw in query.Split(' ', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            var (term, op) = CommandMatcherExtensions.ParseOperator(raw);
+            if (term.Length > 0)
+            {
+                terms.Add((term, op));
+            }
+        }
+
+        return new([.. terms]);
     }
 }
