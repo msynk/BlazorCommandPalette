@@ -1,0 +1,96 @@
+﻿@inherits LayoutComponentBase
+@implements IDisposable
+@inject DemoState State
+@inject ICommandPaletteService Palette
+
+<div class="page">
+    <div class="sidebar">
+        <NavMenu />
+    </div>
+
+    <main>
+        <div class="top-row px-4 d-flex align-items-center gap-3">
+            <CommandPaletteTrigger Label="Search or run a command…" Class="flex-grow-1" style="max-width: 420px" />
+            <button class="btn btn-sm btn-outline-secondary" @onclick="() => Palette.OpenAsync('>'.ToString())">Commands</button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Palette.OpenAsync("#"))">Issues</button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="@(() => Palette.OpenAsync("@"))">People</button>
+            <a href="https://github.com/msynk/BlazorCommandPalette" target="_blank" class="ms-auto">GitHub</a>
+        </div>
+
+        <article class="content px-4">
+            @Body
+        </article>
+    </main>
+</div>
+
+@* Global commands, re-registered whenever demo state changes so toggles/values stay fresh. *@
+<RegisterCommands Commands="_globalCommands" />
+
+<CommandPalette @ref="_palette" OnCommandExecuted="OnExecuted">
+    <DetailTemplate>
+        <div class="demo-detail">
+            <div class="demo-detail-kind">@context.Kind</div>
+            <h3>@context.Title</h3>
+            @if (context.Subtitle is not null)
+            {
+                <p class="demo-detail-sub">@context.Subtitle</p>
+            }
+            @if (context.Description is not null)
+            {
+                <p>@context.Description</p>
+            }
+            @if (context.Shortcut is not null)
+            {
+                <p>Shortcut: <ShortcutHint Shortcut="context.Shortcut" /></p>
+            }
+            @if (context.Keywords.Count > 0)
+            {
+                <p class="demo-detail-sub">Also matches: @string.Join(", ", context.Keywords)</p>
+            }
+            @if (context.Data is Person person)
+            {
+                <dl>
+                    <dt>Role</dt><dd>@person.Role</dd>
+                    <dt>E-mail</dt><dd>@person.Email</dd>
+                </dl>
+            }
+            <code class="demo-detail-id">@context.Id</code>
+        </div>
+    </DetailTemplate>
+    <ChildContent>
+        @* Declarative commands live next to the markup. Nested items become pages. *@
+        <CommandGroup Heading="Quick create" Priority="20">
+            <CommandItem Title="New issue" Shortcut="C" Keywords="create add" IconCss="demo-plus" OnExecute="@(_ => State.Record("New issue dialog opened"))" />
+            <CommandItem Title="New…" Keywords="create add" ChildrenPlaceholder="What do you want to create?">
+                <CommandItem Title="Project" OnExecute="@(_ => State.Record("New project"))" />
+                <CommandItem Title="Document" OnExecute="@(_ => State.Record("New document"))" />
+                <CommandItem Title="Team" OnExecute="@(_ => State.Record("New team"))" Badge="Beta" />
+            </CommandItem>
+        </CommandGroup>
+    </ChildContent>
+</CommandPalette>
+
+@code {
+    private CommandPalette? _palette;
+    private List<Command> _globalCommands = [];
+
+    protected override void OnInitialized()
+    {
+        _globalCommands = DemoCommands.Global(State).ToList();
+        State.Changed += OnStateChanged;
+    }
+
+    private void OnStateChanged()
+    {
+        // Rebuild so Checked / Value reflect the new state (RegisterCommands swaps the registration).
+        _globalCommands = DemoCommands.Global(State).ToList();
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnExecuted(CommandExecutedEventArgs e)
+    {
+        Console.WriteLine($"[palette] {e.Command.Id} → {e.Result.GetType().Name} in {e.Duration.TotalMilliseconds:F0} ms");
+    }
+
+    public void Dispose() => State.Changed -= OnStateChanged;
+}

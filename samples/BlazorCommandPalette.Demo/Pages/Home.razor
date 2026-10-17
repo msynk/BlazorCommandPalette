@@ -1,0 +1,64 @@
+﻿@page "/"
+@inject ICommandPaletteService Palette
+@inject DemoState State
+@implements IDisposable
+
+<PageTitle>BlazorCommandPalette</PageTitle>
+
+<section class="hero">
+    <h1>A world-class command palette for Blazor</h1>
+    <p class="lead">
+        Press <kbd>Ctrl</kbd> <kbd>K</kbd> (or <kbd>⌘</kbd> <kbd>K</kbd>) anywhere. Fuzzy search, nested pages, modes,
+        async sources, recents, shortcuts, multi-select, prompts, a detail pane, full keyboard and screen-reader support.
+    </p>
+    <div class="d-flex gap-2 flex-wrap">
+        <button class="btn btn-primary" @onclick="() => Palette.OpenAsync()">Open palette</button>
+        <button class="btn btn-outline-primary" @onclick="@(() => Palette.OpenAsync(">"))">Commands mode <code>&gt;</code></button>
+        <button class="btn btn-outline-primary" @onclick="@(() => Palette.OpenAsync("#"))">Issues mode <code>#</code></button>
+        <button class="btn btn-outline-primary" @onclick="@(() => Palette.OpenAsync("@"))">People mode <code>@@</code></button>
+        <button class="btn btn-outline-primary" @onclick="@(() => Palette.OpenAsync(pageCommandId: "preferences.theme"))">Open “Theme” page</button>
+    </div>
+</section>
+
+<section class="row g-4 mt-2">
+    <div class="col-lg-6">
+        <h2>Try these</h2>
+        <ul class="try-list">
+            <li>Type <code>gs</code> — fuzzy match jumps to <em>Go to Settings</em>, boundaries highlighted.</li>
+            <li>Type <code>theme</code>, press <kbd>Enter</kbd> — a nested page; <kbd>Backspace</kbd> goes back.</li>
+            <li>Type <code>&gt;</code> — commands mode; <code>#105</code> — issue lookup; <code>@@ada</code> — people search (async).</li>
+            <li>Type <code>doc theming</code> — multi-term AND search also hits the async docs source.</li>
+            <li>Pick <em>Set labels…</em> — multi-select with <kbd>Ctrl</kbd> <kbd>Enter</kbd> to apply.</li>
+            <li>Pick <em>Rename project…</em> — a free-text prompt step.</li>
+            <li>Pick <em>Delete project</em> — destructive, needs a second <kbd>Enter</kbd>.</li>
+            <li>Press <kbd>Tab</kbd> on any item — the action panel (pin, secondary actions).</li>
+            <li>Close the palette and press <kbd>G</kbd> then <kbd>S</kbd> — sequence shortcut navigates to Settings.</li>
+            <li>Use <code>'exact</code>, <code>^prefix</code>, <code>suffix$</code>, <code>!exclude</code> operators.</li>
+        </ul>
+    </div>
+    <div class="col-lg-6">
+        <h2>Activity</h2>
+        <p class="text-muted">Project: <strong>@State.ProjectName</strong> · Labels: @string.Join(", ", State.Labels) · Theme: @State.Theme</p>
+        @if (State.Log.Count == 0)
+        {
+            <p class="text-muted">Run a command and it shows up here.</p>
+        }
+        else
+        {
+            <ul class="log">
+                @foreach (var entry in State.Log)
+                {
+                    <li>@entry</li>
+                }
+            </ul>
+        }
+    </div>
+</section>
+
+@code {
+    protected override void OnInitialized() => State.Changed += Refresh;
+
+    private void Refresh() => InvokeAsync(StateHasChanged);
+
+    public void Dispose() => State.Changed -= Refresh;
+}

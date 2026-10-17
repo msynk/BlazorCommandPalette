@@ -1,0 +1,60 @@
+@page "/features"
+
+<PageTitle>Features · BlazorCommandPalette</PageTitle>
+
+<h1>Features</h1>
+<p class="lead">Everything the research turned up in cmdk, kbar, VS Code's Quick Pick, Raycast, Linear and GitHub — implemented natively in Blazor.</p>
+
+<div class="row g-4">
+    <div class="col-md-6">
+        <h2>Search &amp; ranking</h2>
+        <ul>
+            <li>fzf-style fuzzy matcher: word-boundary, camelCase and consecutive-run bonuses, gap penalties, smart case</li>
+            <li>Multi-term AND queries; <code>'exact</code>, <code>^prefix</code>, <code>suffix$</code>, <code>!negate</code> operators</li>
+            <li>Weighted fields: title › keywords › subtitle › group › description › tags</li>
+            <li>Matched characters highlighted in title and subtitle; keyword hits shown</li>
+            <li>Priority + frecency (frequency × recency) nudges; stable group ordering</li>
+            <li>Pluggable <code>ICommandMatcher</code> (fuzzy or substring built in)</li>
+        </ul>
+
+        <h2>Structure</h2>
+        <ul>
+            <li>Groups with sticky headings, configurable order, flat mode while searching</li>
+            <li>Nested pages (static, lazy-loaded or declarative) with breadcrumbs</li>
+            <li>Modes via prefixes (<code>&gt;</code>, <code>#</code>, <code>@@</code>, <code>?</code>) scoping registry and sources</li>
+            <li>Async <code>ICommandSource</code>s: debounced, cancellable, per-mode, re-ranked or block-ordered</li>
+            <li>Multi-step flows: pages, prompts, multi-select with Ctrl+Enter, toasts</li>
+            <li>Raycast-style action panel on <kbd>Tab</kbd> (secondary actions, pin, forget)</li>
+            <li>Recents, pinned, frecency persisted to localStorage (store is replaceable)</li>
+        </ul>
+    </div>
+    <div class="col-md-6">
+        <h2 id="shortcuts">Keyboard</h2>
+        <table class="table table-sm">
+            <tbody>
+                <tr><td><kbd>Ctrl</kbd>/<kbd>⌘</kbd> <kbd>K</kbd>, <kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>P</kbd></td><td>Toggle</td></tr>
+                <tr><td><kbd>↑</kbd> <kbd>↓</kbd>, <kbd>Ctrl</kbd> <kbd>N</kbd>/<kbd>P</kbd>, <kbd>Ctrl</kbd> <kbd>J</kbd>/<kbd>K</kbd></td><td>Move (loops)</td></tr>
+                <tr><td><kbd>Home</kbd> <kbd>End</kbd> <kbd>PgUp</kbd> <kbd>PgDn</kbd></td><td>Jump</td></tr>
+                <tr><td><kbd>Enter</kbd></td><td>Run / open page / toggle</td></tr>
+                <tr><td><kbd>Ctrl</kbd> <kbd>Enter</kbd></td><td>Apply multi-select / first secondary action</td></tr>
+                <tr><td><kbd>Tab</kbd>, <kbd>→</kbd></td><td>Action panel</td></tr>
+                <tr><td><kbd>Backspace</kbd>, <kbd>←</kbd> (empty query)</td><td>Back</td></tr>
+                <tr><td><kbd>Esc</kbd></td><td>Cancel confirm → back → close</td></tr>
+                <tr><td><kbd>Ctrl</kbd> <kbd>Shift</kbd> <kbd>P</kbd> (inside)</td><td>Pin / unpin active</td></tr>
+                <tr><td><kbd>Shift</kbd> <kbd>Del</kbd></td><td>Forget from recents</td></tr>
+                <tr><td><kbd>G</kbd> then <kbd>H</kbd>/<kbd>F</kbd>/<kbd>P</kbd>/<kbd>S</kbd></td><td>Global sequence shortcuts</td></tr>
+            </tbody>
+        </table>
+
+        <h2>Accessibility &amp; UX</h2>
+        <ul>
+            <li>Native <code>&lt;dialog&gt;</code>: top layer, focus trap, focus restore, scroll lock</li>
+            <li>WAI-ARIA combobox/listbox: <code>aria-activedescendant</code>, <code>aria-selected</code>, live result announcements</li>
+            <li>Platform-aware shortcut hints (⌘ ⇧ ⌥ vs Ctrl/Shift/Alt)</li>
+            <li>Light/dark via <code>prefers-color-scheme</code> or forced theme; reduced-motion aware</li>
+            <li>Mobile: full-screen layout; detail pane for wide screens</li>
+            <li>Templates for items, headers, empty, loading, header, footer, detail, icons; or fully unstyled</li>
+            <li>Virtualization for huge lists; trimming/AOT friendly; multi-targets net8/9/10</li>
+        </ul>
+    </div>
+</div>

@@ -1,0 +1,106 @@
+@page "/playground"
+@inject ICommandPaletteService Palette
+@inject DemoState State
+@implements IDisposable
+
+<PageTitle>Playground · BlazorCommandPalette</PageTitle>
+
+<h1>Playground</h1>
+<p class="lead">Page-scoped commands: the commands below exist only while this page is rendered (kbar's <code>useRegisterActions</code>).</p>
+
+<RegisterCommands Commands="_pageCommands" />
+
+<div class="row g-4">
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Counter: @_count</h5>
+                <p class="card-text">Open the palette and look for <em>Increment counter</em> / <em>Decrement counter</em> under “Playground”, or press <kbd>Ctrl</kbd> <kbd>↑</kbd> / <kbd>Ctrl</kbd> <kbd>↓</kbd>.</p>
+                <button class="btn btn-outline-primary" @onclick="SearchCounter">Search “counter”</button>
+            </div>
+        </div>
+    </div>
+    <div class="col-md-6">
+        <div class="card">
+            <div class="card-body">
+                <h5 class="card-title">Programmatic API</h5>
+                <div class="d-flex flex-column gap-2">
+                    <button class="btn btn-outline-secondary" @onclick="ExecuteWordWrap">Execute “Word wrap” without opening</button>
+                    <button class="btn btn-outline-secondary" @onclick="OpenLabels">Open the “Set labels…” page</button>
+                    <button class="btn btn-outline-secondary" @onclick="OpenNegated">Open with a negated query</button>
+                </div>
+                <p class="mt-3 mb-0 text-muted">Executed: @_executed · Palette is @(Palette.IsOpen ? "open" : "closed")</p>
+            </div>
+        </div>
+    </div>
+</div>
+
+<h2 class="mt-4">Large registry</h2>
+<p>Register 2,000 synthetic commands to see ranking stay snappy. Try <code>cmd 1234</code> or <code>c12</code>.</p>
+<button class="btn btn-outline-secondary" @onclick="ToggleBulk">@(_bulk is null ? "Register 2,000 commands" : "Unregister them")</button>
+
+@code {
+    private int _count;
+    private int _executed;
+    private IDisposable? _bulk;
+    private List<Command> _pageCommands = [];
+
+    protected override void OnInitialized()
+    {
+        _pageCommands =
+        [
+            Cmd.New("Increment counter").Group("Playground").Shortcut("Ctrl+Up").Keywords("plus", "add").Handler(_ => { _count++; Bump(); return Task.FromResult(CommandResult.KeepOpen); }),
+            Cmd.New("Decrement counter").Group("Playground").Shortcut("Ctrl+Down").Keywords("minus", "subtract").Handler(_ => { _count--; Bump(); return Task.FromResult(CommandResult.KeepOpen); }),
+            Cmd.New("Reset counter").Group("Playground").Destructive("Reset the counter to zero?").Handler(_ => { _count = 0; Bump(); return Task.FromResult(CommandResult.Close); }),
+        ];
+
+        Palette.CommandExecuted += OnExecuted;
+        Palette.Opened += Refresh;
+        Palette.Closed += Refresh;
+    }
+
+    private void Bump()
+    {
+        State.Record($"Counter is now {_count}");
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void OnExecuted(object? sender, CommandExecutedEventArgs e)
+    {
+        _executed++;
+        InvokeAsync(StateHasChanged);
+    }
+
+    private void Refresh() => InvokeAsync(StateHasChanged);
+
+    private Task SearchCounter() => Palette.OpenAsync(query: "counter");
+
+    private Task ExecuteWordWrap() => Palette.ExecuteAsync("toggle:wordwrap");
+
+    private Task OpenLabels() => Palette.OpenAsync(pageCommandId: "actions.set-labels");
+
+    private Task OpenNegated() => Palette.OpenAsync(query: "!delete");
+
+    private void ToggleBulk()
+    {
+        if (_bulk is not null)
+        {
+            _bulk.Dispose();
+            _bulk = null;
+            return;
+        }
+
+        var many = Enumerable.Range(1, 2000)
+            .Select(i => Cmd.New($"Command {i}").Id($"bulk:{i}").Group("Bulk").Subtitle($"Synthetic entry #{i}").Priority(CommandPriority.Lowest)
+                .Handler(_ => Task.FromResult(CommandResult.Toast($"Ran command {i}"))).Build());
+        _bulk = Palette.Register(many);
+    }
+
+    public void Dispose()
+    {
+        Palette.CommandExecuted -= OnExecuted;
+        Palette.Opened -= Refresh;
+        Palette.Closed -= Refresh;
+        _bulk?.Dispose();
+    }
+}

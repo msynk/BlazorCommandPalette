@@ -1,0 +1,29 @@
+@namespace BlazorCommandPalette.Components
+
+@if (Shortcut is not null)
+{
+    var chords = Shortcut.DisplayTokens(IsMac);
+    <span class="cp-shortcut @Class" data-cp="shortcut" aria-label="@Shortcut.ToDisplayString(IsMac)">
+        @for (var c = 0; c < chords.Count; c++)
+        {
+            if (c > 0)
+            {
+                <span class="cp-shortcut-then" aria-hidden="true">then</span>
+            }
+            foreach (var token in chords[c])
+            {
+                <kbd class="cp-kbd">@token</kbd>
+            }
+        }
+    </span>
+}
+
+@code {
+    /// <summary>Shortcut to render. Accepts a <see cref="KeyboardShortcut"/> (strings convert implicitly).</summary>
+    [Parameter, EditorRequired] public KeyboardShortcut? Shortcut { get; set; }
+
+    /// <summary>Render macOS symbols (⌘ ⇧ ⌥) instead of words.</summary>
+    [Parameter] public bool IsMac { get; set; }
+
+    [Parameter] public string? Class { get; set; }
+}
