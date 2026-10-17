@@ -1,3 +1,5 @@
+**Note**: moved to bitplatform (https://baletter.bitplatform.dev)
+
 # BlazorCommandPalette
 
 A professional, accessible, keyboard-first **command palette** (`Ctrl+K` / `⌘K`) for Blazor — Server, WebAssembly, and Blazor Web App (any interactive render mode). Inspired by the best of [cmdk](https://github.com/pacocoursey/cmdk), [kbar](https://github.com/timc1/kbar), VS Code's Quick Pick, Raycast, Linear and GitHub's command palette, built natively on .NET 8/9/10.
