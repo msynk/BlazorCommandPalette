@@ -1,4 +1,4 @@
-**Note**: moved to bitplatform (https://baletter.bitplatform.dev)
+**Note**: moved to bitplatform (https://balette.bitplatform.dev)
 
 # BlazorCommandPalette
 
